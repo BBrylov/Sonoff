@@ -7,11 +7,17 @@
 #include "RTCmem.h"
 #include "DS1820.h"
 #include "DHT.h"
+#ifdef RCSwitch
 #include <RCSwitch.h>
+#endif
+#ifdef IRRemote
 #include <IRremoteESP8266.h>
 #include <IRrecv.h>
+#endif
 
-
+#ifdef UDP_enable
+const uint16_t UdplocalPort=54321; // Номер udp порта для работы с другими устройствами
+#endif
 
 //#define WIFISSID "yourssid" // Имя вашей сети для параметров по умолчанию
 //#define WIFIPASS "yourpass" // Пароль от вашей сети для параметров по умолчанию
@@ -47,6 +53,9 @@ const char pathGetSchedule[] PROGMEM = "/getschedule"; // Путь до стра
 const char pathSetSchedule[] PROGMEM = "/setschedule"; // Путь до страницы изменения элемента расписания
 const char pathClimate[] PROGMEM = "/climate"; // Путь до страницы настройки параметров датчика температуры
 
+#ifdef USELDR
+const char pathLDR[] PROGMEM = "/ldr"; // Путь до страницы настройки параметров датчика освещенности
+#endif
 // Имена параметров для Web-форм
 const char paramRelayOnBoot[] PROGMEM = "relayonboot";
 #ifdef UDP_enable
@@ -93,6 +102,15 @@ const char paramClimateMaxHum[] PROGMEM = "climatemaxhum";
 const char paramClimateMinHumTurn[] PROGMEM = "climateminhumturn";
 const char paramClimateMaxHumTurn[] PROGMEM = "climatemaxhumturn";
 
+#ifdef USELDR
+const char paramLDRMinBright[] PROGMEM = "ldrminbright";
+const char paramLDRMaxBright[] PROGMEM = "ldrmaxbright";
+const char paramLDRMinBrightRelay[] PROGMEM = "ldrminbrightrelay";
+const char paramLDRMaxBrightRelay[] PROGMEM = "ldrmaxbrightrelay";
+const char paramLDRMinBrightTurn[] PROGMEM = "ldrminbrightturn";
+const char paramLDRMaxBrightTurn[] PROGMEM = "ldrmaxbrightturn";
+#endif
+
 // Имена JSON-переменных
 const char jsonRelay[] PROGMEM = "relay";
 const char jsonRelayAutoOff[] PROGMEM = "relayautooff";
@@ -115,6 +133,9 @@ const char jsonSendUdp[] PROGMEM = "sendudp";
 const char jsonRemoteUdp[] PROGMEM = "remoteudpval";
 
 #endif
+#ifdef USELDR
+const char jsonLDR[] PROGMEM = "ldr";
+#endif
 // Названия топиков для MQTT
 const char mqttRelayTopic[] PROGMEM = "/Relay";
 const char mqttMotionTopic[] PROGMEM = "/Motion";
@@ -122,7 +143,9 @@ const char mqttTemperatureTopic[] PROGMEM = "/Temperature";
 const char mqttHumidityTopic[] PROGMEM = "/Humidity";
 
 const char strNone[] PROGMEM = "(None)";
-
+#ifdef USELDR
+const char mqttLDRTopic[] PROGMEM = "/LDR";
+#endif
 const uint8_t RELAY_NAME_SIZE = 16;
 
 class ESPWebMQTTRelay : public ESPWebMQTTBase {
@@ -159,13 +182,17 @@ protected:
   void handleGetSchedule(); // Обработчик страницы, возвращающей JSON-пакет элемента расписания
   void handleSetSchedule(); // Обработчик страницы изменения элемента расписания
   void handleClimateConfig(); // Обработчик страницы настройки параметров датчика температуры
-
+#ifdef USELDR
+  void handleLDRConfig(); // Обработчик страницы настройки параметров датчика освещенности
+#endif
   String navigator();
   String btnRelayConfig(); // HTML-код кнопки вызова настройки реле
   String btnControlConfig(); // HTML-код кнопки вызова настройки датчика движения
   String btnSchedulesConfig(); // HTML-код кнопки вызова настройки расписания
   String btnClimateConfig(); // HTML-код кнопки вызова настройки датчика температуры
-
+#ifdef USELDR
+  String btnLDRConfig(); // HTML-код кнопки вызова настройки датчика температуры
+#endif
   void mqttCallback(char* topic, byte* payload, unsigned int length);
   void mqttResubscribe();
 
@@ -196,7 +223,9 @@ private:
   void publishMotion(bool motion); // Публикация обнаружения движения в MQTT
   void publishTemperature(); // Публикация температуры в MQTT
   void publishHumidity(); // Публикация влажности в MQTT
-
+#ifdef USELDR
+  void publishLDR(); // Публикация освещенности в MQTT
+#endif
   struct relay_t {
     bool relayOnBoot; // Состояние реле при старте модуля
     uint16_t relayAutoOff; // Значения задержки реле в секундах до автоотключения (0 - нет автоотключения)
@@ -235,8 +264,12 @@ private:
         uint32_t remoteCodeOn, remoteCodeOff, remoteCodeToggle, remoteCodeDouble;
         uint32_t lastRemoteCode;
         union {
+#ifdef RCSwitch
           RCSwitch *rf;
+#endif          
+#ifdef IRRemote          
           IRrecv *ir;
+#endif          
         };
       };
 
@@ -282,6 +315,14 @@ float UdpRemoteVal;
     DS1820 *ds;
     DHT *dht;
   };
+  #ifdef USELDR
+  uint32_t ldrReadTime; // Время в миллисекундах, после которого можно считывать новое значение освещенности
+  int16_t ldr; // Значение успешно прочитанной освещенности
+  int16_t ldrMinBright, ldrMaxBright; // Минимальное и максимальное значение освещенности срабатывания реле
+  turn_t ldrMinBrightRelay, ldrMaxBrightRelay; // Какой канал реле и что с ним делать по срабатыванию события (6 младших бит - номер канала реле, 2 старших бита - вкл/выкл/перекл)
+  bool ldrMinBrightTriggered, ldrMaxBrightTriggered; // Было ли срабатывание реле по порогу освещенности?
+  bool use_ldr=1; //использовать LDR для управленя реле
+#endif
 };
 
 static String charBufToString(const char* str, uint16_t bufSize) {
@@ -364,13 +405,19 @@ void ESPWebMQTTRelay::cleanup() {
   if (remoteSensor != REMOTE_NONE) {
     if (remoteSensor == REMOTE_PIR) {
       detachInterrupt(remotePin);
-    } else if ((remoteSensor == REMOTE_RF) && rf) {
+    } 
+#ifdef RCSwitch    
+    else if ((remoteSensor == REMOTE_RF) && rf) {
       rf->disableReceive();
       delete rf;
-    } else if ((remoteSensor == REMOTE_IR) && ir) {
+    } 
+#endif
+#ifdef IRRemote 
+    else if ((remoteSensor == REMOTE_IR) && ir) {
       ir->disableIRIn();
       delete ir;
     }
+ #endif   
   }
   ESPWebMQTTBase::cleanup();
 }
@@ -402,13 +449,19 @@ void ESPWebMQTTRelay::setupExtra() {
     if (remoteSensor == REMOTE_PIR) {
       pinMode(remotePin, INPUT);
       attachInterrupt(remotePin, pirISR, CHANGE);
-    } else if (remoteSensor == REMOTE_RF) {
+    } 
+#ifdef RCSwitch    
+    else if (remoteSensor == REMOTE_RF) {
       rf = new RCSwitch();
       rf->enableReceive(remotePin);
-    } else if (remoteSensor == REMOTE_IR) {
+    } 
+#endif    
+#ifdef IRRemote
+    else if (remoteSensor == REMOTE_IR) {
       ir = new IRrecv(remotePin);
       ir->enableIRIn();
     }
+#endif    
   }
   lastRemoteCode = 0;
 
@@ -444,8 +497,14 @@ void ESPWebMQTTRelay::setupExtra() {
   climateMinHumTriggered = false;
   climateMaxHumTriggered = false;
 
-
-
+#ifdef USELDR
+  pinMode(LDR_pin, INPUT);
+  ldrReadTime = 0;
+  ldr = -1;
+  use_ldr=true;
+  ldrMinBrightTriggered = false;
+  ldrMaxBrightTriggered = false;
+#endif
 }
 
 void ESPWebMQTTRelay::loopExtra() {
@@ -488,11 +547,63 @@ void ESPWebMQTTRelay::loopExtra() {
         _log->println(F(" motion stopped"));
     }
   }
+#ifdef USELDR
+  if  ((use_ldr)&&((int32_t)(millis() - ldrReadTime) >= 0)) {
+    static const int16_t LDR_TOLERANCE = 120;
+    static const uint32_t LDR_TIMEOUT = 500;
 
+    int16_t v;
+
+    v = !digitalRead(LDR_pin);
+    if (v != -1) {
+      if ((ldr == -1) || (ldr!=v)) {
+        ldr = v;
+/*               _log->print(dateTimeToStr(now));  
+              _log->print(F(" ldr pin "));  
+             _log->print(ldr);  
+              _log->println(F(" LDR changed"));        */ 
+        publishLDR();
+        if (ldrMinBright != -1) {
+          if (ldr <= ldrMinBright) {
+            if (! ldrMinBrightTriggered) {
+              if ((ldrMinBrightRelay == TURN_TOGGLE)) // toggle bit is set
+                toggleRelay();
+              else
+              
+                switchRelay(ldrMinBrightRelay == TURN_ON);
+              _log->print(dateTimeToStr(now));  
+              _log->println(F("LDR minimal brightness triggered"));
+              ldrMinBrightTriggered = true;
+            }
+          } else
+            ldrMinBrightTriggered = false;
+        }
+        if (ldrMaxBright != -1) {
+          if (ldr >= ldrMaxBright) {
+            if (! ldrMaxBrightTriggered) {
+              if ((ldrMaxBrightRelay == TURN_TOGGLE)) // toggle bit is set
+                toggleRelay();
+              else
+                switchRelay(ldrMaxBrightRelay  == TURN_ON);
+              _log->print(dateTimeToStr(now));
+              _log->println(F("LDR maximal brightness triggered"));
+              ldrMaxBrightTriggered = true;
+            }
+          } else
+            ldrMaxBrightTriggered = false;
+        }
+      }
+    } else {
+      _log->println(F("LDR brightness read error!"));
+    }
+    ldrReadTime = millis() + LDR_TIMEOUT;
+  }
+#endif
   if (remoteSensor != REMOTE_NONE) {
     const int32_t remoteTimeout = 250;
     static uint32_t lastRemoteTime;
 
+#ifdef RCSwitch
     if (remoteSensor == REMOTE_RF) {
       if (rf) {
         if (rf->available()) {
@@ -529,7 +640,10 @@ void ESPWebMQTTRelay::loopExtra() {
           lastRemoteTime = millis();
         }
       }
-    } else if (remoteSensor == REMOTE_IR) {
+    } 
+    #endif
+    #ifdef IRRemote
+    else if (remoteSensor == REMOTE_IR) {
       if (ir) {
         static decode_results results;
 
@@ -569,6 +683,7 @@ void ESPWebMQTTRelay::loopExtra() {
         }
       }
     }
+  #endif
   }
 
   if (now) {
@@ -580,6 +695,9 @@ void ESPWebMQTTRelay::loopExtra() {
               toggleRelay();
             else
               switchRelay(scheduleTurns[i] == TURN_ON);
+
+              if(scheduleTurns[i] == TURN_ON) use_ldr=1;
+              else use_ldr=0;  
           }
           logDateTime(now);
           _log->print(F(" schedule \""));
@@ -610,12 +728,13 @@ void ESPWebMQTTRelay::loopExtra() {
               publishTemperature();
              if (! isnan(climateMinTemp)) {
                 if (climateTemperature < climateMinTemp) {
+ #ifdef UDP_enable               
                 if ((remoteSensor==REMOTE_UDP) && (! isnan(UdpRemoteVal)) && (!isnan(remoteUdpMax))) 
                   {
                   if (UdpRemoteVal<remoteUdpMax)
                     {       
                      if (! climateMinTempTriggered) {
-                     if (climateMinTempTurn != TURN_TOGGLE) {
+                     if (climateMinTempTurn != TURN_NONE) {
                       if (climateMinTempTurn == TURN_TOGGLE)
                         toggleRelay();
                       else
@@ -636,7 +755,7 @@ void ESPWebMQTTRelay::loopExtra() {
                    } else
                     {
                       if (! climateMinTempTriggered) {
-                     if (climateMinTempTurn != TURN_TOGGLE) {
+                     if (climateMinTempTurn != TURN_NONE) {
                       if (climateMinTempTurn == TURN_TOGGLE)
                         toggleRelay();
                       else
@@ -648,6 +767,8 @@ void ESPWebMQTTRelay::loopExtra() {
                  } else
                   climateMinTempTriggered = false; 
                     } 
+
+#endif                    
 
               }
              }
@@ -949,6 +1070,16 @@ uint16_t ESPWebMQTTRelay::readConfig() {
     getEEPROM(offset, _turn);
     offset += sizeof(_turn);
     climateMaxHumTurn = _turn;
+#ifdef USELDR
+    getEEPROM(offset, ldrMinBright);
+    offset += sizeof(ldrMinBright);
+    getEEPROM(offset, ldrMaxBright);
+    offset += sizeof(ldrMaxBright);
+    getEEPROM(offset, ldrMinBrightRelay);
+    offset += sizeof(ldrMinBrightRelay);
+    getEEPROM(offset, ldrMaxBrightRelay);
+    offset += sizeof(ldrMaxBrightRelay);
+#endif
 
     uint8_t crc = crc8EEPROM(start, offset);
     if (readEEPROM(offset++) != crc) {
@@ -1036,6 +1167,16 @@ uint16_t ESPWebMQTTRelay::writeConfig(bool commit) {
   putEEPROM(offset, _turn);
   offset += sizeof(_turn);
 
+#ifdef USELDR
+  putEEPROM(offset, ldrMinBright);
+  offset += sizeof(ldrMinBright);
+  putEEPROM(offset, ldrMaxBright);
+  offset += sizeof(ldrMaxBright);
+  putEEPROM(offset, ldrMinBrightRelay);
+  offset += sizeof(ldrMinBrightRelay);
+  putEEPROM(offset, ldrMaxBrightRelay);
+  offset += sizeof(ldrMaxBrightRelay);
+#endif
   uint8_t crc = crc8EEPROM(start, offset);
   writeEEPROM(offset++, crc);
   if (commit)
@@ -1101,6 +1242,12 @@ void ESPWebMQTTRelay::defaultConfig(uint8_t level) {
     climateMaxHum = NAN;
     climateMinHumTurn = TURN_NONE;
     climateMaxHumTurn = TURN_NONE;
+#ifdef USELDR
+    ldrMinBright = -1;
+    ldrMaxBright = -1;
+    ldrMinBrightRelay = TURN_NONE;
+    ldrMaxBrightRelay = TURN_NONE;
+#endif
   }
 }
 
@@ -1108,9 +1255,13 @@ bool ESPWebMQTTRelay::setConfigParam(const String &name, const String &value) {
   if (! ESPWebMQTTBase::setConfigParam(name, value)) {
     if (name.equals(FPSTR(paramRelayOnBoot))) {
       relay.relayOnBoot = constrain(value.toInt(), 0, 1);
-    } else if (name.equals(FPSTR(paramRelaySendUdp))) {
+    } 
+#ifdef UDP_enable    
+    else if (name.equals(FPSTR(paramRelaySendUdp))) {
       relay.relaySendUdp = constrain(value.toInt(), 0, 1);    
-    } else if (name.equals(FPSTR(paramRelayAutoOff))) {
+    } 
+#endif    
+    else if (name.equals(FPSTR(paramRelayAutoOff))) {
       relay.relayAutoOff = _max(0, value.toInt());
     } else if (name.equals(FPSTR(paramRelayDblClkAutoOff))) {
       relay.relayDblClkAutoOff = _max(0, value.toInt());
@@ -1122,15 +1273,21 @@ bool ESPWebMQTTRelay::setConfigParam(const String &name, const String &value) {
       if (remoteSensor != _remoteSensor) {
         if (remoteSensor == REMOTE_PIR) {
           detachInterrupt(remotePin);
-        } else if ((remoteSensor == REMOTE_RF) && rf) {
+        } 
+#ifdef RCSwitch        
+        else if ((remoteSensor == REMOTE_RF) && rf) {
           rf->disableReceive();
           delete rf;
           rf = NULL;
-        } else if ((remoteSensor == REMOTE_IR) && ir) {
+        } 
+#endif
+#ifdef IRRemote        
+        else if ((remoteSensor == REMOTE_IR) && ir) {
           ir->disableIRIn();
           delete ir;
           ir = NULL;
         } 
+#endif        
 #ifdef UDP_enable
 
         else if ((remoteSensor == REMOTE_UDP) && udp)
@@ -1212,6 +1369,26 @@ bool ESPWebMQTTRelay::setConfigParam(const String &name, const String &value) {
     } else if (name.equals(FPSTR(paramClimateMaxHumTurn))) {
       climateMaxHumTurn = (turn_t)value.toInt();
     } else
+
+#ifdef USELDR
+      if (name.equals(FPSTR(paramLDRMinBright))) {
+        if (value.length())
+          ldrMinBright = constrain(value.toInt(), -1, 1023);
+        else
+          ldrMinBright = -1;
+      } else if (name.equals(FPSTR(paramLDRMaxBright))) {
+        if (value.length())
+          ldrMaxBright = constrain(value.toInt(), -1, 1023);
+        else
+          ldrMaxBright = -1;
+     
+     
+      } else if (name.equals(FPSTR(paramLDRMinBrightTurn))) {
+        ldrMinBrightRelay =(turn_t)value.toInt();
+      } else if (name.equals(FPSTR(paramLDRMaxBrightTurn))) {
+        ldrMaxBrightRelay =(turn_t)value.toInt();
+      } else
+#endif
       return false;
   }
 
@@ -1226,6 +1403,9 @@ void ESPWebMQTTRelay::setupHttpServer() {
   httpServer->on(String(FPSTR(pathControl)).c_str(), std::bind(&ESPWebMQTTRelay::handleControlConfig, this));
   httpServer->on(String(FPSTR(pathRemoteData)).c_str(), std::bind(&ESPWebMQTTRelay::handleRemoteData, this));
   httpServer->on(String(FPSTR(pathClimate)).c_str(), std::bind(&ESPWebMQTTRelay::handleClimateConfig, this));
+#ifdef USELDR
+  httpServer->on(String(FPSTR(pathLDR)).c_str(), std::bind(&ESPWebMQTTRelay::handleLDRConfig, this));
+#endif
   httpServer->on(String(FPSTR(pathSchedules)).c_str(), std::bind(&ESPWebMQTTRelay::handleSchedulesConfig, this));
   httpServer->on(String(FPSTR(pathGetSchedule)).c_str(), std::bind(&ESPWebMQTTRelay::handleGetSchedule, this));
   httpServer->on(String(FPSTR(pathSetSchedule)).c_str(), std::bind(&ESPWebMQTTRelay::handleSetSchedule, this));
@@ -1352,6 +1532,13 @@ var data = JSON.parse(request.responseText);\n");
     script += FPSTR(jsonMotion);
     script += F(" != true ? \"not \" : \"\");\n");
   }
+  #ifdef USELDR
+  script += FPSTR(getElementById);
+  script += FPSTR(jsonLDR);
+  script += F("').innerHTML = data.");
+  script += FPSTR(jsonLDR);
+  script += F(";\n");
+#endif
 #ifdef UDP_enable
     if (remoteSensor == REMOTE_UDP) {
     script += FPSTR(getElementById);
@@ -1428,6 +1615,11 @@ Uptime: <span id=\"");
     page += F("\">?</span> <sup>o</sup>C<br/>\n");
   }
   #endif
+#ifdef USELDR
+  page += F("Brightness: <span id=\"");
+  page += FPSTR(jsonLDR);
+  page += F("\">?</span><br/>\n");
+#endif
   if (remoteSensor == REMOTE_PIR) {
     page += F("Motion: <span id=\"");
     page += FPSTR(jsonMotion);
@@ -1513,7 +1705,12 @@ String ESPWebMQTTRelay::jsonData() {
         }
 
   #endif   
-
+#ifdef USELDR
+  result += F(",\"");
+  result += FPSTR(jsonLDR);
+  result += F("\":");
+  result += String(ldr);
+#endif
 
   if (remoteSensor == REMOTE_PIR) {
     result += F(",\"");
@@ -2476,6 +2673,58 @@ void ESPWebMQTTRelay::handleClimateConfig() {
   httpServer->send(200, FPSTR(textHtml), page);
 }
 
+#ifdef USELDR
+void ESPWebMQTTRelay::handleLDRConfig() {
+  String page = ESPWebBase::webPageStart(F("LDR Setup"));
+  page += ESPWebBase::webPageBody();
+  page += F("<form name=\"ldr\" method=\"GET\" action=\"");
+  page += FPSTR(pathStore);
+  page += F("\">\n");
+  page += F("<h3>LDR Setup</h3>\n\
+<label>Minimal brightness:</label></br>\n\
+<input type=\"text\" name=\"");
+  page += FPSTR(paramLDRMinBright);
+  page += F("\" value=\"");
+
+  if (ldrMinBright != -1)
+    page += String(ldrMinBright);
+  page += F("\" size=4 maxlength=4>\n\
+(leave blank if not used)</br>\n");
+page += F("<label>Turn relay</label>\n");
+  page += turnRadios(FPSTR(paramLDRMinBrightTurn), ldrMinBrightRelay);
+
+
+
+  page += F("</br><label>Maximal brightness:</label></br>\n\
+<input type=\"text\" name=\"");
+  page += FPSTR(paramLDRMaxBright);
+  page += F("\" value=\"");
+
+  if (ldrMaxBright != -1)
+    page += String(ldrMaxBright);
+  page += F("\" size=4 maxlength=4>\n\
+(leave blank if not used)</br>\n");
+page += F("<label>Turn relay</label>\n");
+  page += turnRadios(FPSTR(paramLDRMaxBrightTurn), ldrMaxBrightRelay);
+ 
+
+
+
+
+
+  page += F("</br>\n<p>\n");
+  page += ESPWebBase::tagInput(FPSTR(typeSubmit), strEmpty, F("Save"));
+  page += charLF;
+  page += btnBack();
+  page += ESPWebBase::tagInput(FPSTR(typeHidden), FPSTR(paramReboot), "0");
+  page += F("\n\
+</form>\n");
+  page += ESPWebBase::webPageEnd();
+
+  httpServer->send(200, FPSTR(textHtml), page);
+}
+#endif
+
 String ESPWebMQTTRelay::navigator() {
   String result = btnWiFiConfig();
   result += btnTimeConfig();
@@ -2484,6 +2733,9 @@ String ESPWebMQTTRelay::navigator() {
   result += btnControlConfig();
   result += btnSchedulesConfig();
   result += btnClimateConfig();
+  #ifdef USELDR
+  result += btnLDRConfig();
+#endif
   result += btnLog();
   result += btnReboot();
 
@@ -2518,6 +2770,15 @@ String ESPWebMQTTRelay::btnClimateConfig() {
   return result;
 }
 
+
+#ifdef USELDR
+String ESPWebMQTTRelay::btnLDRConfig() {
+  String result = ESPWebBase::tagInput(FPSTR(typeButton), strEmpty, F("LDR Setup"), String(F("onclick=\"location.href='")) + String(FPSTR(pathLDR)) + String(F("'\"")));
+  result += charLF;
+
+  return result;
+}
+#endif
 void ESPWebMQTTRelay::mqttCallback(char* topic, byte* payload, unsigned int length) {
   ESPWebMQTTBase::mqttCallback(topic, payload, length);
 
@@ -2789,6 +3050,8 @@ void ESPWebMQTTRelay::btnCallback(Button::buttonstate_t state) {
     enablePulse(FASTPULSE);
   } else if (state == Button::BTN_CLICK) {
     toggleRelay(false);
+/*     if ((digitalRead(relayPin) != relayLevel) use_ldr=1;
+    else use_ldr=0; */
     events->postEvent(Events::EVT_BTNCLICK);
   } else if (state == Button::BTN_DBLCLICK) {
     if (relay.relayDblClkAutoOff)
@@ -2885,6 +3148,22 @@ String ESPWebMQTTRelay::turnRadios(const String &name, turn_t value) {
 
   return result;
 }
+
+
+#ifdef USELDR
+void ESPWebMQTTRelay::publishLDR() {
+  if (pubSubClient->connected()) {
+    String topic;
+
+    if (_mqttClient != strEmpty) {
+      topic += charSlash;
+      topic += _mqttClient;
+    }
+    topic += FPSTR(mqttLDRTopic);
+    mqttPublish(topic, String(ldr));
+  }
+}
+#endif
 
 ESPWebMQTTRelay *app = new ESPWebMQTTRelay();
 
